@@ -22,7 +22,7 @@
 volatile bool g_running = true;
 bool g_console_allocated = false;
 
-void KeyListenerThread(ConnectionTracker& tracker, PacketThrottler& throttler, HANDLE divert_handle)
+void KeyListenerThread(ConnectionTracker &tracker, PacketThrottler &throttler, HANDLE divert_handle)
 {
     // If running in background with no console, we don't need keyboard input
     if (!g_console_allocated)
@@ -31,7 +31,7 @@ void KeyListenerThread(ConnectionTracker& tracker, PacketThrottler& throttler, H
     }
 
     std::cout << "\n-------------------------------------------------------------\n";
-    std::cout << "FocusGuard Running. Controls:\n";
+    std::cout << "DoomGuard Running. Controls:\n";
     std::cout << "  [s] Print active connections and productivity metrics\n";
     std::cout << "  [q] Quit application cleanly\n";
     std::cout << "-------------------------------------------------------------\n\n";
@@ -60,7 +60,7 @@ void KeyListenerThread(ConnectionTracker& tracker, PacketThrottler& throttler, H
                 uint64_t time_saved = attempts * 10; // 10 minutes saved per attempt
 
                 std::cout << "=============================================\n";
-                std::cout << "FocusGuard - Productivity Metrics\n";
+                std::cout << "DoomGuard - Productivity Metrics\n";
                 std::cout << "=============================================\n";
                 std::cout << "Focus Schedule Active? : " << (IsInFocusHours() ? "YES" : "NO") << "\n";
                 std::cout << "Blocked Attempts       : " << attempts << " attempt(s) (Frustration Counter)\n";
@@ -93,7 +93,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         if (AllocConsole())
         {
             g_console_allocated = true;
-            FILE* fp;
+            FILE *fp;
             freopen_s(&fp, "CONOUT$", "w", stdout);
             freopen_s(&fp, "CONIN$", "r", stdin);
             freopen_s(&fp, "CONOUT$", "w", stderr);
@@ -114,7 +114,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     // Intercept outbound/inbound TCP 443 (HTTPS) and UDP 443 (QUIC)
-    const char* filter = "tcp and (tcp.DstPort == 443 or tcp.SrcPort == 443) or udp and (udp.DstPort == 443 or udp.SrcPort == 443)";
+    const char *filter = "tcp and (tcp.DstPort == 443 or tcp.SrcPort == 443) or udp and (udp.DstPort == 443 or udp.SrcPort == 443)";
 
     HANDLE handle = WinDivertOpen(
         filter,
@@ -204,22 +204,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 {
                     if (ipv6_header)
                     {
-                        is_throttled = tracker.IsIpThrottled(true, reinterpret_cast<const uint8_t*>(ipv6_header->DstAddr));
+                        is_throttled = tracker.IsIpThrottled(true, reinterpret_cast<const uint8_t *>(ipv6_header->DstAddr));
                     }
                     else if (ip_header)
                     {
-                        is_throttled = tracker.IsIpThrottled(false, reinterpret_cast<const uint8_t*>(&ip_header->DstAddr));
+                        is_throttled = tracker.IsIpThrottled(false, reinterpret_cast<const uint8_t *>(&ip_header->DstAddr));
                     }
                 }
                 else
                 {
                     if (ipv6_header)
                     {
-                        is_throttled = tracker.IsIpThrottled(true, reinterpret_cast<const uint8_t*>(ipv6_header->SrcAddr));
+                        is_throttled = tracker.IsIpThrottled(true, reinterpret_cast<const uint8_t *>(ipv6_header->SrcAddr));
                     }
                     else if (ip_header)
                     {
-                        is_throttled = tracker.IsIpThrottled(false, reinterpret_cast<const uint8_t*>(&ip_header->SrcAddr));
+                        is_throttled = tracker.IsIpThrottled(false, reinterpret_cast<const uint8_t *>(&ip_header->SrcAddr));
                     }
                 }
             }
@@ -246,9 +246,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 ip_header,
                 ipv6_header,
                 tcp_header,
-                static_cast<const uint8_t*>(payload),
-                payload_len
-            );
+                static_cast<const uint8_t *>(payload),
+                payload_len);
 
             // Re-build connection key to check throttle status
             ConnectionKey key = {};
@@ -293,7 +292,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             if (IsInFocusHours() && tracker.IsKeyThrottled(key))
             {
                 // Slow Path: Route packet to rate-limiting bucket asynchronously
-                throttler.QueuePacket(key, reinterpret_cast<const uint8_t*>(packet), packetLen, addr);
+                throttler.QueuePacket(key, reinterpret_cast<const uint8_t *>(packet), packetLen, addr);
             }
             else
             {

@@ -61,7 +61,7 @@ static bool EndsWith(std::string_view str, std::string_view suffix)
     return str.compare(str.length() - suffix.length(), suffix.length(), suffix) == 0;
 }
 
-static bool IsStreamingClassification(const std::string& classification)
+static bool IsStreamingClassification(const std::string &classification)
 {
     return classification == "NETFLIX" ||
            classification == "PRIMEVIDEO" ||
@@ -319,7 +319,7 @@ void ConnectionTracker::PrintActiveConnections() const
 {
     std::lock_guard<std::mutex> lock(mtx_);
     std::cout << "\n=============================================\n";
-    std::cout << "FocusGuard - Active Connections Map\n";
+    std::cout << "DoomGuard - Active Connections Map\n";
     std::cout << "=============================================\n";
 
     if (hostname_to_connections_.empty())
@@ -373,7 +373,7 @@ void ConnectionTracker::PruneInactiveConnections(ULONGLONG timeout_ms)
     }
 }
 
-bool ConnectionTracker::IsKeyThrottled(const ConnectionKey& key) const
+bool ConnectionTracker::IsKeyThrottled(const ConnectionKey &key) const
 {
     std::lock_guard<std::mutex> lock(mtx_);
     auto it = connections_.find(key);
@@ -395,7 +395,7 @@ bool ConnectionTracker::IsKeyThrottled(const ConnectionKey& key) const
     return false;
 }
 
-bool ConnectionTracker::IsIpThrottled(bool is_ipv6, const uint8_t* ip) const
+bool ConnectionTracker::IsIpThrottled(bool is_ipv6, const uint8_t *ip) const
 {
     std::lock_guard<std::mutex> lock(mtx_);
     IpAddress dst_ip = {};
@@ -411,7 +411,7 @@ bool ConnectionTracker::IsIpThrottled(bool is_ipv6, const uint8_t* ip) const
 
 void ConnectionTracker::LoadCache()
 {
-    std::ifstream file("focusguard_cache.txt");
+    std::ifstream file("DoomGuard_cache.txt");
     if (!file.is_open())
     {
         return;
@@ -443,25 +443,25 @@ void ConnectionTracker::LoadCache()
 
 void ConnectionTracker::SaveCache() const
 {
-    std::ofstream file("focusguard_cache.txt");
+    std::ofstream file("DoomGuard_cache.txt");
     if (!file.is_open())
     {
         return;
     }
 
-    for (const auto& pair : ip_to_classification_)
+    for (const auto &pair : ip_to_classification_)
     {
-        const IpAddress& ip_addr = pair.first;
-        const std::string& classification = pair.second;
+        const IpAddress &ip_addr = pair.first;
+        const std::string &classification = pair.second;
 
-        char buffer[INET6_ADDRSTRLEN] = { 0 };
+        char buffer[INET6_ADDRSTRLEN] = {0};
         if (ip_addr.is_ipv6)
         {
-            inet_ntop(AF_INET6, const_cast<uint8_t*>(ip_addr.ip), buffer, sizeof(buffer));
+            inet_ntop(AF_INET6, const_cast<uint8_t *>(ip_addr.ip), buffer, sizeof(buffer));
         }
         else
         {
-            inet_ntop(AF_INET, const_cast<uint8_t*>(ip_addr.ip), buffer, sizeof(buffer));
+            inet_ntop(AF_INET, const_cast<uint8_t *>(ip_addr.ip), buffer, sizeof(buffer));
         }
         file << buffer << " " << classification << "\n";
     }
@@ -472,4 +472,3 @@ uint64_t ConnectionTracker::GetBlockedAttempts() const
     std::lock_guard<std::mutex> lock(mtx_);
     return blocked_attempts_;
 }
-
