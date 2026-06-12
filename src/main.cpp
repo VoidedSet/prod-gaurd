@@ -3,25 +3,36 @@
 #endif
 
 #include <iostream>
+#include <iomanip>
 #include <winsock2.h>
 #include <windows.h>
 #include <thread>
 #include <conio.h>
+#include <cstring>
 #include "windivert.h"
 #include "connection_tracker.h"
 #include "packet_throttler.h"
+#include "schedule.h"
 
 // Link required libraries for MSVC
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "user32.lib")
 
 // Globals to signal shutdown
 volatile bool g_running = true;
+bool g_console_allocated = false;
 
-void KeyListenerThread(ConnectionTracker& tracker, HANDLE divert_handle)
+void KeyListenerThread(ConnectionTracker& tracker, PacketThrottler& throttler, HANDLE divert_handle)
 {
+    // If running in background with no console, we don't need keyboard input
+    if (!g_console_allocated)
+    {
+        return;
+    }
+
     std::cout << "\n-------------------------------------------------------------\n";
     std::cout << "FocusGuard Running. Controls:\n";
-    std::cout << "  [s] Print active connections map\n";
+    std::cout << "  [s] Print active connections and productivity metrics\n";
     std::cout << "  [q] Quit application cleanly\n";
     std::cout << "-------------------------------------------------------------\n\n";
 
@@ -39,21 +50,66 @@ void KeyListenerThread(ConnectionTracker& tracker, HANDLE divert_handle)
             }
             else if (ch == 's' || ch == 'S')
             {
+                // Print connection tracking details
                 tracker.PrintActiveConnections();
+
+                // Print productivity metrics
+                uint64_t attempts = tracker.GetBlockedAttempts();
+                uint64_t bytes = throttler.GetBytesThrottled();
+                double mb = static_cast<double>(bytes) / (1024.0 * 1024.0);
+                uint64_t time_saved = attempts * 10; // 10 minutes saved per attempt
+
+                std::cout << "=============================================\n";
+                std::cout << "FocusGuard - Productivity Metrics\n";
+                std::cout << "=============================================\n";
+                std::cout << "Focus Schedule Active? : " << (IsInFocusHours() ? "YES" : "NO") << "\n";
+                std::cout << "Blocked Attempts       : " << attempts << " attempt(s) (Frustration Counter)\n";
+                std::cout << "Bandwidth Throttled    : " << std::fixed << std::setprecision(2) << mb << " MB\n";
+                std::cout << "Estimated Time Saved   : " << time_saved << " minutes\n";
+                std::cout << "=============================================\n\n";
             }
         }
         Sleep(100);
     }
 }
 
-int main()
+// Windows subsystem entry point
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
+    // Parse MSVC global arguments
+    bool show_console = false;
+    for (int i = 1; i < __argc; ++i)
+    {
+        if (std::strcmp(__argv[i], "--show") == 0 || std::strcmp(__argv[i], "--console") == 0)
+        {
+            show_console = true;
+            break;
+        }
+    }
+
+    if (show_console)
+    {
+        // Dynamically allocate console window
+        if (AllocConsole())
+        {
+            g_console_allocated = true;
+            FILE* fp;
+            freopen_s(&fp, "CONOUT$", "w", stdout);
+            freopen_s(&fp, "CONIN$", "r", stdin);
+            freopen_s(&fp, "CONOUT$", "w", stderr);
+            std::ios::sync_with_stdio();
+        }
+    }
+
     // Initialize Winsock
     WSADATA wsaData;
     int wsa_res = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (wsa_res != 0)
     {
-        std::cerr << "Error: WSAStartup failed with error " << wsa_res << "\n";
+        if (g_console_allocated)
+        {
+            std::cerr << "Error: WSAStartup failed with error " << wsa_res << "\n";
+        }
         return 1;
     }
 
@@ -69,11 +125,14 @@ int main()
 
     if (handle == INVALID_HANDLE_VALUE)
     {
-        DWORD err = GetLastError();
-        std::cerr << "Error: Failed to open WinDivert handle (Error code " << err << ").\n";
-        if (err == ERROR_ACCESS_DENIED)
+        if (g_console_allocated)
         {
-            std::cerr << "Please ensure you are running this application as Administrator.\n";
+            DWORD err = GetLastError();
+            std::cerr << "Error: Failed to open WinDivert handle (Error code " << err << ").\n";
+            if (err == ERROR_ACCESS_DENIED)
+            {
+                std::cerr << "Please ensure you are running this application as Administrator.\n";
+            }
         }
         WSACleanup();
         return 1;
@@ -85,8 +144,8 @@ int main()
     // Start background throttling worker
     throttler.Start();
 
-    // Start keyboard input listener thread
-    std::thread key_thread(KeyListenerThread, std::ref(tracker), handle);
+    // Start keyboard input listener thread (runs only if console is allocated)
+    std::thread key_thread(KeyListenerThread, std::ref(tracker), std::ref(throttler), handle);
 
     char packet[65535];
     UINT packetLen;
@@ -138,33 +197,36 @@ int main()
         if (udp_header)
         {
             bool is_throttled = false;
-            if (addr.Outbound)
+            // Only drop UDP packets for throttled hosts if Focus Schedule is active
+            if (IsInFocusHours())
             {
-                if (ipv6_header)
+                if (addr.Outbound)
                 {
-                    is_throttled = tracker.IsIpThrottled(true, reinterpret_cast<const uint8_t*>(ipv6_header->DstAddr));
+                    if (ipv6_header)
+                    {
+                        is_throttled = tracker.IsIpThrottled(true, reinterpret_cast<const uint8_t*>(ipv6_header->DstAddr));
+                    }
+                    else if (ip_header)
+                    {
+                        is_throttled = tracker.IsIpThrottled(false, reinterpret_cast<const uint8_t*>(&ip_header->DstAddr));
+                    }
                 }
-                else if (ip_header)
+                else
                 {
-                    is_throttled = tracker.IsIpThrottled(false, reinterpret_cast<const uint8_t*>(&ip_header->DstAddr));
-                }
-            }
-            else
-            {
-                if (ipv6_header)
-                {
-                    is_throttled = tracker.IsIpThrottled(true, reinterpret_cast<const uint8_t*>(ipv6_header->SrcAddr));
-                }
-                else if (ip_header)
-                {
-                    is_throttled = tracker.IsIpThrottled(false, reinterpret_cast<const uint8_t*>(&ip_header->SrcAddr));
+                    if (ipv6_header)
+                    {
+                        is_throttled = tracker.IsIpThrottled(true, reinterpret_cast<const uint8_t*>(ipv6_header->SrcAddr));
+                    }
+                    else if (ip_header)
+                    {
+                        is_throttled = tracker.IsIpThrottled(false, reinterpret_cast<const uint8_t*>(&ip_header->SrcAddr));
+                    }
                 }
             }
 
             if (is_throttled)
             {
-                // Silently drop UDP packets destined for throttled services (Netflix)
-                // This forces the client browser to immediately fall back to TCP 443
+                // Silently drop UDP packets destined for Netflix to force TCP fallback
                 continue;
             }
             else
@@ -227,7 +289,8 @@ int main()
                 }
             }
 
-            if (tracker.IsKeyThrottled(key))
+            // Only throttle TCP packets if Focus Schedule is active
+            if (IsInFocusHours() && tracker.IsKeyThrottled(key))
             {
                 // Slow Path: Route packet to rate-limiting bucket asynchronously
                 throttler.QueuePacket(key, reinterpret_cast<const uint8_t*>(packet), packetLen, addr);
@@ -255,9 +318,9 @@ int main()
     }
 
     throttler.Stop();
+    tracker.SaveCache(); // Make sure cache is fully written on exit
     WinDivertClose(handle);
     WSACleanup();
 
-    std::cout << "FocusGuard stopped successfully.\n";
     return 0;
 }

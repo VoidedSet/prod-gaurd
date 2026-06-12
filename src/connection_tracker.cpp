@@ -4,7 +4,9 @@
 
 #include "connection_tracker.h"
 #include "packet_parser.h"
+#include "schedule.h"
 #include <iostream>
+#include <fstream>
 #include <cstring>
 #include <algorithm>
 #include <cctype>
@@ -12,6 +14,12 @@
 #include <ws2tcpip.h>
 
 #pragma comment(lib, "ws2_32.lib")
+
+ConnectionTracker::ConnectionTracker()
+    : blocked_attempts_(0)
+{
+    LoadCache();
+}
 
 bool ConnectionKey::operator<(const ConnectionKey &other) const
 {
@@ -53,6 +61,15 @@ static bool EndsWith(std::string_view str, std::string_view suffix)
     return str.compare(str.length() - suffix.length(), suffix.length(), suffix) == 0;
 }
 
+static bool IsStreamingClassification(const std::string& classification)
+{
+    return classification == "NETFLIX" ||
+           classification == "PRIMEVIDEO" ||
+           classification == "DISNEYPLUS" ||
+           classification == "HOTSTAR" ||
+           classification == "HIANIME";
+}
+
 std::string ConnectionTracker::ClassifyHostname(std::string hostname) const
 {
     // Convert to lowercase
@@ -60,12 +77,40 @@ std::string ConnectionTracker::ClassifyHostname(std::string hostname) const
                    [](unsigned char c)
                    { return std::tolower(c); });
 
-    // Netflix
+    // Netflix & fast.com
     if (EndsWith(hostname, "netflix.com") || EndsWith(hostname, "netflix.net") ||
         EndsWith(hostname, "nflxext.com") || EndsWith(hostname, "nflximg.net") ||
-        EndsWith(hostname, "nflxvideo.net") || EndsWith(hostname, "nflxso.net"))
+        EndsWith(hostname, "nflxvideo.net") || EndsWith(hostname, "nflxso.net") ||
+        EndsWith(hostname, "fast.com"))
     {
         return "NETFLIX";
+    }
+
+    // Prime Video
+    if (EndsWith(hostname, "primevideo.com") || EndsWith(hostname, "pv-cdn.net") ||
+        EndsWith(hostname, "amazonvideo.com") || EndsWith(hostname, "media-amazon.com"))
+    {
+        return "PRIMEVIDEO";
+    }
+
+    // Disney+
+    if (EndsWith(hostname, "disneyplus.com") || EndsWith(hostname, "dssott.com"))
+    {
+        return "DISNEYPLUS";
+    }
+
+    // Hotstar
+    if (EndsWith(hostname, "hotstar.com") || EndsWith(hostname, "hotstar-cdn.net"))
+    {
+        return "HOTSTAR";
+    }
+
+    // HiAnime
+    if (EndsWith(hostname, "hianime.to") || EndsWith(hostname, "hianime.nz") ||
+        EndsWith(hostname, "hianime.sx") || EndsWith(hostname, "hianime.mn") ||
+        EndsWith(hostname, "hianime.ru"))
+    {
+        return "HIANIME";
     }
 
     // YouTube
@@ -206,6 +251,12 @@ void ConnectionTracker::ProcessPacket(
             std::cout << "[" << info.classification << "] " << info.dst_ip_str << ":" << info.dst_port << "\n";
 
             hostname_to_connections_[info.classification].insert(key);
+
+            // Count blocked attempt if connection matches any streaming site during focus hours
+            if (IsStreamingClassification(info.classification) && tcp_hdr->Syn && !tcp_hdr->Ack && IsInFocusHours())
+            {
+                blocked_attempts_++;
+            }
         }
 
         connections_[key] = info;
@@ -249,6 +300,14 @@ void ConnectionTracker::ProcessPacket(
             dst_ip.is_ipv6 = key.is_ipv6;
             std::memcpy(dst_ip.ip, key.dst_ip, 16);
             ip_to_classification_[dst_ip] = classification;
+
+            SaveCache(); // Persist immediately to file
+
+            // Count blocked attempt for first-time SNI classification
+            if (IsStreamingClassification(classification) && IsInFocusHours())
+            {
+                blocked_attempts_++;
+            }
 
             // Add to active mapping
             hostname_to_connections_[classification].insert(key);
@@ -320,7 +379,7 @@ bool ConnectionTracker::IsKeyThrottled(const ConnectionKey& key) const
     auto it = connections_.find(key);
     if (it != connections_.end())
     {
-        return it->second.classification == "NETFLIX";
+        return IsStreamingClassification(it->second.classification);
     }
 
     // Check classification cache for server IP
@@ -330,7 +389,7 @@ bool ConnectionTracker::IsKeyThrottled(const ConnectionKey& key) const
     auto cache_it = ip_to_classification_.find(dst_ip);
     if (cache_it != ip_to_classification_.end())
     {
-        return cache_it->second == "NETFLIX";
+        return IsStreamingClassification(cache_it->second);
     }
 
     return false;
@@ -345,8 +404,72 @@ bool ConnectionTracker::IsIpThrottled(bool is_ipv6, const uint8_t* ip) const
     auto cache_it = ip_to_classification_.find(dst_ip);
     if (cache_it != ip_to_classification_.end())
     {
-        return cache_it->second == "NETFLIX";
+        return IsStreamingClassification(cache_it->second);
     }
     return false;
+}
+
+void ConnectionTracker::LoadCache()
+{
+    std::ifstream file("focusguard_cache.txt");
+    if (!file.is_open())
+    {
+        return;
+    }
+
+    std::string ip_str, classification;
+    while (file >> ip_str >> classification)
+    {
+        IpAddress ip_addr = {};
+        if (ip_str.find(':') != std::string::npos)
+        {
+            ip_addr.is_ipv6 = true;
+            if (inet_pton(AF_INET6, ip_str.c_str(), ip_addr.ip) != 1)
+            {
+                continue;
+            }
+        }
+        else
+        {
+            ip_addr.is_ipv6 = false;
+            if (inet_pton(AF_INET, ip_str.c_str(), ip_addr.ip) != 1)
+            {
+                continue;
+            }
+        }
+        ip_to_classification_[ip_addr] = classification;
+    }
+}
+
+void ConnectionTracker::SaveCache() const
+{
+    std::ofstream file("focusguard_cache.txt");
+    if (!file.is_open())
+    {
+        return;
+    }
+
+    for (const auto& pair : ip_to_classification_)
+    {
+        const IpAddress& ip_addr = pair.first;
+        const std::string& classification = pair.second;
+
+        char buffer[INET6_ADDRSTRLEN] = { 0 };
+        if (ip_addr.is_ipv6)
+        {
+            inet_ntop(AF_INET6, const_cast<uint8_t*>(ip_addr.ip), buffer, sizeof(buffer));
+        }
+        else
+        {
+            inet_ntop(AF_INET, const_cast<uint8_t*>(ip_addr.ip), buffer, sizeof(buffer));
+        }
+        file << buffer << " " << classification << "\n";
+    }
+}
+
+uint64_t ConnectionTracker::GetBlockedAttempts() const
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return blocked_attempts_;
 }
 

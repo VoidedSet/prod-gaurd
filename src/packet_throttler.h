@@ -48,6 +48,9 @@ public:
         UINT packet_len,
         const WINDIVERT_ADDRESS& addr);
 
+    // Retrieves the total number of bytes throttled (rate-limited)
+    uint64_t GetBytesThrottled() const;
+
 private:
     void WorkerThreadFunc();
 
@@ -57,6 +60,7 @@ private:
 
     mutable std::mutex mtx_;
     std::map<ConnectionKey, TokenBucket> buckets_;
+    uint64_t bytes_throttled_ = 0;
 };
 
 #endif // PACKET_THROTTLER_H

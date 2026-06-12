@@ -51,6 +51,8 @@ struct ConnectionInfo
 class ConnectionTracker
 {
 public:
+    ConnectionTracker();
+
     // Processes a packet, tracking connection state, parsing TLS SNI, and maintaining mappings.
     void ProcessPacket(
         const WINDIVERT_ADDRESS& addr,
@@ -72,6 +74,15 @@ public:
     // Checks if an IP is classified as a throttled domain
     bool IsIpThrottled(bool is_ipv6, const uint8_t* ip) const;
 
+    // Loads the classification cache from disk.
+    void LoadCache();
+
+    // Saves the classification cache to disk.
+    void SaveCache() const;
+
+    // Retrieves the number of blocked connection attempts.
+    uint64_t GetBlockedAttempts() const;
+
 private:
     // Classifies a hostname into the designated target domains or UNKNOWN.
     std::string ClassifyHostname(std::string hostname) const;
@@ -90,6 +101,7 @@ private:
     std::map<ConnectionKey, ConnectionInfo> connections_;
     std::map<std::string, std::set<ConnectionKey>> hostname_to_connections_;
     std::map<IpAddress, std::string> ip_to_classification_; // Dynamic IP-to-classification cache
+    uint64_t blocked_attempts_;
 };
 
 #endif // CONNECTION_TRACKER_H

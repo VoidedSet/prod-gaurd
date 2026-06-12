@@ -106,6 +106,7 @@ void PacketThrottler::WorkerThreadFunc()
                     if (bucket.tokens >= static_cast<double>(pkt_len))
                     {
                         bucket.tokens -= static_cast<double>(pkt_len);
+                        bytes_throttled_ += pkt_len; // Track bytes throttled
 
                         // Reinject the packet
                         WinDivertSend(
@@ -147,4 +148,10 @@ void PacketThrottler::WorkerThreadFunc()
             Sleep(20);
         }
     }
+}
+
+uint64_t PacketThrottler::GetBytesThrottled() const
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return bytes_throttled_;
 }
