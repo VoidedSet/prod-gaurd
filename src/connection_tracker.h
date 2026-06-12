@@ -66,6 +66,12 @@ public:
     // Prunes connections that have not seen traffic within the timeout period (in milliseconds).
     void PruneInactiveConnections(ULONGLONG timeout_ms);
 
+    // Checks if a TCP connection is throttled (e.g. classified as NETFLIX)
+    bool IsKeyThrottled(const ConnectionKey& key) const;
+
+    // Checks if an IP is classified as a throttled domain
+    bool IsIpThrottled(bool is_ipv6, const uint8_t* ip) const;
+
 private:
     // Classifies a hostname into the designated target domains or UNKNOWN.
     std::string ClassifyHostname(std::string hostname) const;

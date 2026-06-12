@@ -313,3 +313,40 @@ void ConnectionTracker::PruneInactiveConnections(ULONGLONG timeout_ms)
         }
     }
 }
+
+bool ConnectionTracker::IsKeyThrottled(const ConnectionKey& key) const
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    auto it = connections_.find(key);
+    if (it != connections_.end())
+    {
+        return it->second.classification == "NETFLIX";
+    }
+
+    // Check classification cache for server IP
+    IpAddress dst_ip = {};
+    dst_ip.is_ipv6 = key.is_ipv6;
+    std::memcpy(dst_ip.ip, key.dst_ip, 16);
+    auto cache_it = ip_to_classification_.find(dst_ip);
+    if (cache_it != ip_to_classification_.end())
+    {
+        return cache_it->second == "NETFLIX";
+    }
+
+    return false;
+}
+
+bool ConnectionTracker::IsIpThrottled(bool is_ipv6, const uint8_t* ip) const
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    IpAddress dst_ip = {};
+    dst_ip.is_ipv6 = is_ipv6;
+    std::memcpy(dst_ip.ip, ip, 16);
+    auto cache_it = ip_to_classification_.find(dst_ip);
+    if (cache_it != ip_to_classification_.end())
+    {
+        return cache_it->second == "NETFLIX";
+    }
+    return false;
+}
+

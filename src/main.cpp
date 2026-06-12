@@ -9,6 +9,7 @@
 #include <conio.h>
 #include "windivert.h"
 #include "connection_tracker.h"
+#include "packet_throttler.h"
 
 // Link required libraries for MSVC
 #pragma comment(lib, "ws2_32.lib")
@@ -19,7 +20,7 @@ volatile bool g_running = true;
 void KeyListenerThread(ConnectionTracker& tracker, HANDLE divert_handle)
 {
     std::cout << "\n-------------------------------------------------------------\n";
-    std::cout << "FocusGuard Classifier Running. Controls:\n";
+    std::cout << "FocusGuard Running. Controls:\n";
     std::cout << "  [s] Print active connections map\n";
     std::cout << "  [q] Quit application cleanly\n";
     std::cout << "-------------------------------------------------------------\n\n";
@@ -33,7 +34,6 @@ void KeyListenerThread(ConnectionTracker& tracker, HANDLE divert_handle)
             {
                 std::cout << "\nShutdown requested. Closing interception handle...\n";
                 g_running = false;
-                // Closing or shutting down the handle breaks the blocking WinDivertRecv call
                 WinDivertShutdown(divert_handle, WINDIVERT_SHUTDOWN_BOTH);
                 break;
             }
@@ -48,7 +48,7 @@ void KeyListenerThread(ConnectionTracker& tracker, HANDLE divert_handle)
 
 int main()
 {
-    // Initialize Winsock (required for inet_ntop and other socket functions)
+    // Initialize Winsock
     WSADATA wsaData;
     int wsa_res = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (wsa_res != 0)
@@ -57,8 +57,8 @@ int main()
         return 1;
     }
 
-    // Intercept both outbound and inbound TCP traffic on port 443 (HTTPS)
-    const char* filter = "tcp and (tcp.DstPort == 443 or tcp.SrcPort == 443)";
+    // Intercept outbound/inbound TCP 443 (HTTPS) and UDP 443 (QUIC)
+    const char* filter = "tcp and (tcp.DstPort == 443 or tcp.SrcPort == 443) or udp and (udp.DstPort == 443 or udp.SrcPort == 443)";
 
     HANDLE handle = WinDivertOpen(
         filter,
@@ -80,8 +80,12 @@ int main()
     }
 
     ConnectionTracker tracker;
+    PacketThrottler throttler(handle);
 
-    // Start key listener thread
+    // Start background throttling worker
+    throttler.Start();
+
+    // Start keyboard input listener thread
     std::thread key_thread(KeyListenerThread, std::ref(tracker), handle);
 
     char packet[65535];
@@ -94,6 +98,7 @@ int main()
         PWINDIVERT_IPHDR ip_header = nullptr;
         PWINDIVERT_IPV6HDR ipv6_header = nullptr;
         PWINDIVERT_TCPHDR tcp_header = nullptr;
+        PWINDIVERT_UDPHDR udp_header = nullptr;
         PVOID payload = nullptr;
         UINT payload_len = 0;
 
@@ -104,7 +109,7 @@ int main()
                 &packetLen,
                 &addr))
         {
-            // If the handle was closed or shutdown, break the loop
+            // Aborted due to handle close
             if (GetLastError() == ERROR_OPERATION_ABORTED)
             {
                 break;
@@ -112,7 +117,7 @@ int main()
             continue;
         }
 
-        // Parse IP and TCP headers
+        // Parse IP, TCP and UDP headers
         WinDivertHelperParsePacket(
             packet,
             packetLen,
@@ -122,15 +127,58 @@ int main()
             nullptr, // icmp
             nullptr, // icmpv6
             &tcp_header,
-            nullptr, // udp
+            &udp_header,
             &payload,
             &payload_len,
             nullptr, // next
             nullptr  // next len
         );
 
+        // --- 1. Handle UDP (QUIC) Traffic ---
+        if (udp_header)
+        {
+            bool is_throttled = false;
+            if (addr.Outbound)
+            {
+                if (ipv6_header)
+                {
+                    is_throttled = tracker.IsIpThrottled(true, reinterpret_cast<const uint8_t*>(ipv6_header->DstAddr));
+                }
+                else if (ip_header)
+                {
+                    is_throttled = tracker.IsIpThrottled(false, reinterpret_cast<const uint8_t*>(&ip_header->DstAddr));
+                }
+            }
+            else
+            {
+                if (ipv6_header)
+                {
+                    is_throttled = tracker.IsIpThrottled(true, reinterpret_cast<const uint8_t*>(ipv6_header->SrcAddr));
+                }
+                else if (ip_header)
+                {
+                    is_throttled = tracker.IsIpThrottled(false, reinterpret_cast<const uint8_t*>(&ip_header->SrcAddr));
+                }
+            }
+
+            if (is_throttled)
+            {
+                // Silently drop UDP packets destined for throttled services (Netflix)
+                // This forces the client browser to immediately fall back to TCP 443
+                continue;
+            }
+            else
+            {
+                // Fast Path (Free Way): Immediately reinject unthrottled UDP packets
+                WinDivertSend(handle, packet, packetLen, nullptr, &addr);
+            }
+            continue;
+        }
+
+        // --- 2. Handle TCP Traffic ---
         if (tcp_header)
         {
+            // Process the packet to maintain connections and update tracker mappings
             tracker.ProcessPacket(
                 addr,
                 ip_header,
@@ -139,23 +187,63 @@ int main()
                 static_cast<const uint8_t*>(payload),
                 payload_len
             );
-        }
 
-        // Reinject the packet
-        WinDivertSend(
-            handle,
-            packet,
-            packetLen,
-            nullptr,
-            &addr
-        );
+            // Re-build connection key to check throttle status
+            ConnectionKey key = {};
+            if (ipv6_header)
+            {
+                key.is_ipv6 = true;
+                if (addr.Outbound)
+                {
+                    std::memcpy(key.src_ip, ipv6_header->SrcAddr, 16);
+                    std::memcpy(key.dst_ip, ipv6_header->DstAddr, 16);
+                    key.src_port = ntohs(tcp_header->SrcPort);
+                    key.dst_port = ntohs(tcp_header->DstPort);
+                }
+                else
+                {
+                    std::memcpy(key.src_ip, ipv6_header->DstAddr, 16);
+                    std::memcpy(key.dst_ip, ipv6_header->SrcAddr, 16);
+                    key.src_port = ntohs(tcp_header->DstPort);
+                    key.dst_port = ntohs(tcp_header->SrcPort);
+                }
+            }
+            else if (ip_header)
+            {
+                key.is_ipv6 = false;
+                if (addr.Outbound)
+                {
+                    std::memcpy(key.src_ip, &ip_header->SrcAddr, 4);
+                    std::memcpy(key.dst_ip, &ip_header->DstAddr, 4);
+                    key.src_port = ntohs(tcp_header->SrcPort);
+                    key.dst_port = ntohs(tcp_header->DstPort);
+                }
+                else
+                {
+                    std::memcpy(key.src_ip, &ip_header->DstAddr, 4);
+                    std::memcpy(key.dst_ip, &ip_header->SrcAddr, 4);
+                    key.src_port = ntohs(tcp_header->DstPort);
+                    key.dst_port = ntohs(tcp_header->SrcPort);
+                }
+            }
+
+            if (tracker.IsKeyThrottled(key))
+            {
+                // Slow Path: Route packet to rate-limiting bucket asynchronously
+                throttler.QueuePacket(key, reinterpret_cast<const uint8_t*>(packet), packetLen, addr);
+            }
+            else
+            {
+                // Fast Path (Free Way): Immediately reinject all unthrottled TCP packets
+                WinDivertSend(handle, packet, packetLen, nullptr, &addr);
+            }
+        }
 
         // Periodically prune inactive connections (every 10 seconds)
         ULONGLONG now = GetTickCount64();
         if (now - last_prune_time > 10000)
         {
-            // Prune connections that haven't seen packets in 5 minutes (300000 ms)
-            tracker.PruneInactiveConnections(300000);
+            tracker.PruneInactiveConnections(300000); // 5 min timeout
             last_prune_time = now;
         }
     }
@@ -166,6 +254,7 @@ int main()
         key_thread.join();
     }
 
+    throttler.Stop();
     WinDivertClose(handle);
     WSACleanup();
 
