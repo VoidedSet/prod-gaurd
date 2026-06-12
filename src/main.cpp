@@ -1,13 +1,13 @@
 #include <iostream>
 #include <winsock2.h>
-#include <ws2tcpip.h>
+// #include <ws2tcpip.h>
 #include <windows.h>
 #include "windivert.h"
 
 int main()
 {
     HANDLE handle = WinDivertOpen(
-        "outbound and tcp and ip",
+        "outbound and tcp.DstPort == 443",
         WINDIVERT_LAYER_NETWORK,
         0,
         0);
@@ -56,23 +56,24 @@ int main()
 
         if (ip_header && tcp_header)
         {
-            IN_ADDR dstAddr;
-            dstAddr.S_un.S_addr = ip_header->DstAddr;
-
-            char ipStr[INET_ADDRSTRLEN];
-
-            if (InetNtopA(
-                    AF_INET,
-                    &dstAddr,
-                    ipStr,
-                    INET_ADDRSTRLEN))
+            if (tcp_header->Syn && !tcp_header->Ack)
             {
-                std::cout
-                    << "TCP -> "
-                    << ipStr
-                    << ":"
-                    << ntohs(tcp_header->DstPort)
-                    << '\n';
+                IN_ADDR dstAddr;
+                dstAddr.S_un.S_addr = ip_header->DstAddr;
+
+                char *ipStr = inet_ntoa(dstAddr);
+
+                if (ipStr)
+                {
+                    std::cout
+                        << "NEW TCP -> "
+                        << ipStr
+                        << ":"
+                        << ntohs(tcp_header->DstPort)
+                        << '\n';
+                }
+
+                Sleep(3000);
             }
         }
 
